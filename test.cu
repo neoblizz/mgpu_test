@@ -1,4 +1,5 @@
 #include <cstdlib>  // EXIT_SUCCESS
+#include "omp.h"
 #include "nvToolsExt.h"
 #include "thrust/host_vector.h"
 #include "thrust/device_vector.h"
@@ -111,6 +112,7 @@ void do_test(int num_arguments, char** argument_array) {
   };
   
   nvtxRangePushA("thrust_work");
+  #pragma omp parallel for num_threads(num_gpus)
   for(int i = 0 ; i < num_gpus ; i++) {
     cudaSetDevice(i);
 
@@ -159,6 +161,7 @@ void do_test(int num_arguments, char** argument_array) {
 }
 
 int main(int argc, char** argv) {
-  do_test(argc, argv);
+  for(int i = 0 ; i < 10 ; i++)
+    do_test(argc, argv);
   return EXIT_SUCCESS;
 }
