@@ -35,23 +35,23 @@ void do_test(int num_arguments, char** argument_array) {
   
   cudaSetDevice(0);
   thrust::device_vector<int> input0  = h_input;
-  thrust::device_vector<int> toutput0 = h_output;
-  thrust::device_vector<int> koutput0 = h_output;
+  thrust::device_vector<int> output_thrust0 = h_output;
+  thrust::device_vector<int> output_kernel0 = h_output;
 
   cudaSetDevice(1);
   thrust::device_vector<int> input1  = h_input;
-  thrust::device_vector<int> toutput1 = h_output;
-  thrust::device_vector<int> koutput1 = h_output;
+  thrust::device_vector<int> output_thrust1 = h_output;
+  thrust::device_vector<int> output_kernel1 = h_output;
 
   cudaSetDevice(2);
   thrust::device_vector<int> input2  = h_input;
-  thrust::device_vector<int> toutput2 = h_output;
-  thrust::device_vector<int> koutput2 = h_output;
+  thrust::device_vector<int> output_thrust2 = h_output;
+  thrust::device_vector<int> output_kernel2 = h_output;
 
   cudaSetDevice(3);
   thrust::device_vector<int> input3  = h_input;
-  thrust::device_vector<int> toutput3 = h_output;
-  thrust::device_vector<int> koutput3 = h_output;
+  thrust::device_vector<int> output_thrust3 = h_output;
+  thrust::device_vector<int> output_kernel3 = h_output;
 
   std::vector<thrust::device_vector<int>*> all_inputs;
   all_inputs.push_back(&input0);
@@ -60,16 +60,16 @@ void do_test(int num_arguments, char** argument_array) {
   all_inputs.push_back(&input3);
   
   std::vector<thrust::device_vector<int>*> all_outputs_thrust;
-  all_outputs_thrust.push_back(&toutput0);
-  all_outputs_thrust.push_back(&toutput1);
-  all_outputs_thrust.push_back(&toutput2);
-  all_outputs_thrust.push_back(&toutput3);
+  all_outputs_thrust.push_back(&output_thrust0);
+  all_outputs_thrust.push_back(&output_thrust1);
+  all_outputs_thrust.push_back(&output_thrust2);
+  all_outputs_thrust.push_back(&output_thrust3);
 
   std::vector<thrust::device_vector<int>*> all_outputs_kernel;
-  all_outputs_kernel.push_back(&koutput0);
-  all_outputs_kernel.push_back(&koutput1);
-  all_outputs_kernel.push_back(&koutput2);
-  all_outputs_kernel.push_back(&koutput3);
+  all_outputs_kernel.push_back(&output_kernel0);
+  all_outputs_kernel.push_back(&output_kernel1);
+  all_outputs_kernel.push_back(&output_kernel2);
+  all_outputs_kernel.push_back(&output_kernel3);
 
   // --
   // Setup devices
@@ -98,7 +98,9 @@ void do_test(int num_arguments, char** argument_array) {
   }
   
   // --
-  // Run
+  // Thrust
+  
+  cudaSetDevice(0);
   
   auto fn = [=] __host__ __device__(int const& i) -> bool {
     int acc = 0;
@@ -108,7 +110,6 @@ void do_test(int num_arguments, char** argument_array) {
     return acc % 2 == 0 ? 0 : 1;
   };
   
-  // Thrust
   nvtxRangePushA("thrust_work");
   for(int i = 0 ; i < num_gpus ; i++) {
     cudaSetDevice(i);
@@ -124,10 +125,14 @@ void do_test(int num_arguments, char** argument_array) {
   }
   
   for(int i = 0; i < num_gpus; i++) cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  
+  for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
   nvtxRangePop();
   
+  // --
   // Kernel
+  
+  cudaSetDevice(0);
+  
   nvtxRangePushA("kernel_work");
   for(int i = 0 ; i < num_gpus ; i++) {
     cudaSetDevice(i);
@@ -141,10 +146,9 @@ void do_test(int num_arguments, char** argument_array) {
   }
   
   for(int i = 0; i < num_gpus; i++) cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  
+  for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
   nvtxRangePop();
   
-  cudaSetDevice(0);
   thrust::host_vector<int> ttmp = *all_outputs_thrust[0];
   thrust::copy(ttmp.begin(), ttmp.begin() + 100, std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
