@@ -21,56 +21,32 @@ void do_test(int num_arguments, char** argument_array) {
   // --
   // Create data
   
-  int n = 200000;
+  int n = 400000;
   
   thrust::host_vector<int> h_input(n);
   thrust::host_vector<int> h_output(n);
   
-  for(int i = 0; i < n; i++) h_input[i] = i;
+  for(int i = 0; i < n; i++) h_input[i] = rand() % 1000000;
   thrust::fill(thrust::host, h_output.begin(), h_output.end(), -1);
-    
+
+  thrust::device_vector<int> input = h_input;
+  thrust::device_vector<int> output_thrust = h_output;
+  thrust::device_vector<int> output_kernel = h_output;
+
   // --
   // Setup data
   
-  int num_gpus = 4;
+  int num_gpus = 1;
+  cudaGetDeviceCount(&num_gpus);
   
-  cudaSetDevice(0);
-  thrust::device_vector<int> input0  = h_input;
-  thrust::device_vector<int> output_thrust0 = h_output;
-  thrust::device_vector<int> output_kernel0 = h_output;
-
-  cudaSetDevice(1);
-  thrust::device_vector<int> input1  = h_input;
-  thrust::device_vector<int> output_thrust1 = h_output;
-  thrust::device_vector<int> output_kernel1 = h_output;
-
-  cudaSetDevice(2);
-  thrust::device_vector<int> input2  = h_input;
-  thrust::device_vector<int> output_thrust2 = h_output;
-  thrust::device_vector<int> output_kernel2 = h_output;
-
-  cudaSetDevice(3);
-  thrust::device_vector<int> input3  = h_input;
-  thrust::device_vector<int> output_thrust3 = h_output;
-  thrust::device_vector<int> output_kernel3 = h_output;
-
-  std::vector<thrust::device_vector<int>*> all_inputs;
-  all_inputs.push_back(&input0);
-  all_inputs.push_back(&input1);
-  all_inputs.push_back(&input2);
-  all_inputs.push_back(&input3);
-  
-  std::vector<thrust::device_vector<int>*> all_outputs_thrust;
-  all_outputs_thrust.push_back(&output_thrust0);
-  all_outputs_thrust.push_back(&output_thrust1);
-  all_outputs_thrust.push_back(&output_thrust2);
-  all_outputs_thrust.push_back(&output_thrust3);
-
-  std::vector<thrust::device_vector<int>*> all_outputs_kernel;
-  all_outputs_kernel.push_back(&output_kernel0);
-  all_outputs_kernel.push_back(&output_kernel1);
-  all_outputs_kernel.push_back(&output_kernel2);
-  all_outputs_kernel.push_back(&output_kernel3);
+  // Peer access
+  for(int i = 0; i < num_gpus; i++) {
+    cudaSetDevice(i);
+    for(int j = 0; j < num_gpus; j++) {
+      if(i == j) continue;
+      cudaDeviceEnablePeerAccess(j, 0);
+    }
+  }
 
   // --
   // Setup devices
@@ -108,7 +84,7 @@ void do_test(int num_arguments, char** argument_array) {
     for(int ii = 0; ii < i; ii++)
       acc += ii;
     
-    return acc % 2 == 0 ? 0 : 1;
+    return (i + acc) % 2 == 0;
   };
   
   nvtxRangePushA("thrust_work");
@@ -116,11 +92,17 @@ void do_test(int num_arguments, char** argument_array) {
   for(int i = 0 ; i < num_gpus ; i++) {
     cudaSetDevice(i);
 
-    thrust::transform(
+    auto input_begin  = input.begin() + chunk_size * i;
+    auto input_end    = input.begin() + chunk_size * (i + 1);
+    auto output_begin = output_thrust.begin() + chunk_size * i;
+    
+    if(i == num_gpus - 1) input_end = input.end();
+    
+    thrust::copy_if(
       thrust::cuda::par.on(infos[i].stream),
-      all_inputs[i]->begin(),
-      all_inputs[i]->end(),
-      all_outputs_thrust[i]->begin(),
+      input_begin,
+      input_end,
+      output_begin,
       fn
     );
     cudaEventRecord(infos[i].event, infos[i].stream);
@@ -130,34 +112,34 @@ void do_test(int num_arguments, char** argument_array) {
   for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
   nvtxRangePop();
   
-  // --
-  // Kernel
+  // // --
+  // // Kernel
   
-  cudaSetDevice(0);
+  // cudaSetDevice(0);
   
-  nvtxRangePushA("kernel_work");
-  for(int i = 0 ; i < num_gpus ; i++) {
-    cudaSetDevice(i);
-    fn_kernel<<<(n + 255) / 256, 256, 0, infos[i].stream>>>(
-      n, 
-      all_inputs[i]->data().get(),
-      all_outputs_kernel[i]->data().get()
-    );
+  // nvtxRangePushA("kernel_work");
+  // for(int i = 0 ; i < num_gpus ; i++) {
+  //   cudaSetDevice(i);
+  //   fn_kernel<<<(n + 255) / 256, 256, 0, infos[i].stream>>>(
+  //     n, 
+  //     input.data().get(),
+  //     output_kernel.data().get()
+  //   );
 
-    cudaEventRecord(infos[i].event, infos[i].stream);
-  }
+  //   cudaEventRecord(infos[i].event, infos[i].stream);
+  // }
   
-  for(int i = 0; i < num_gpus; i++) cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
-  nvtxRangePop();
+  // for(int i = 0; i < num_gpus; i++) cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+  // for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
+  // nvtxRangePop();
   
-  thrust::host_vector<int> ttmp = *all_outputs_thrust[0];
-  thrust::copy(ttmp.begin(), ttmp.begin() + 100, std::ostream_iterator<int>(std::cout, " "));
+  thrust::host_vector<int> ttmp = output_thrust;
+  thrust::copy(ttmp.begin(), ttmp.begin() + 40, std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
   
-  thrust::host_vector<int> ktmp = *all_outputs_kernel[0];
-  thrust::copy(ktmp.begin(), ktmp.begin() + 100, std::ostream_iterator<int>(std::cout, " "));
-  std::cout << std::endl;
+  // thrust::host_vector<int> ktmp = output_kernel;
+  // thrust::copy(ktmp.begin(), ktmp.begin() + 40, std::ostream_iterator<int>(std::cout, " "));
+  // std::cout << std::endl;
 }
 
 int main(int argc, char** argv) {
