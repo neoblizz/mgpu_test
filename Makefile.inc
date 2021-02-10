@@ -3,8 +3,9 @@ NVCC_VERSION = $(strip $(shell nvcc --version | grep release | sed 's/.*release 
 
 CXX = g++
 
+GEN_SM61 = -gencode=arch=compute_61,code=\"sm_61,compute_61\" # GTX 10XX
 GEN_SM70 = -gencode=arch=compute_70,code=\"sm_70,compute_70\" # Volta V100
-SM_TARGETS = $(GEN_SM70)
+SM_TARGETS = $(GEN_SM61)
 
 CUB         = -lcub
 CUSPARSE    = -lcusparse
