@@ -17,7 +17,7 @@ void do_test(int num_arguments, char** argument_array) {
   thrust::host_vector<int> h_output(n);
   
   for(int i = 0; i < n; i++) 
-    h_input[i] = rand() % 100000;
+    h_input[i] = rand() % 1000000;
   
   thrust::fill(thrust::host, h_output.begin(), h_output.end(), -1);
 
