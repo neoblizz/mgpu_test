@@ -1,21 +1,10 @@
+#include <thread>
 #include <cuda.h>
 #include <nvToolsExt.h>
 #include <omp.h>
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
 #include <cstdlib>  // EXIT_SUCCESS
-
-__global__ void fn_kernel(int n, int* x, int* y) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
-    int i = x[idx];
-    int acc = 0;
-    for (int ii = 0; ii < i; ii++) {
-      acc += ii;
-    }
-    y[i] = (int)(acc % 2);
-  }
-}
 
 template <typename type_t>
 class physical_memory {
@@ -166,59 +155,39 @@ void do_test(int num_arguments, char** argument_array) {
 
   cudaDeviceSynchronize();
   nvtxRangePushA("thrust_work");
-#pragma omp parallel for num_threads(num_gpus)
-  for (int i = 0; i < num_gpus; i++) {
-    cudaSetDevice(i);
+  std::vector<std::thread> threads;
+  for(unsigned int i = 0; i < num_gpus; ++i) {
+    threads.push_back(std::thread([&, i]() {
 
-    auto input_begin = input.begin() + chunk_size * i;
-    auto input_end = input.begin() + chunk_size * (i + 1);
-    auto output_begin = output_thrust.begin() + chunk_size * i;
+      cudaSetDevice(i);
 
-    if (i == num_gpus - 1)
-      input_end = input.end();
+      auto input_begin = input.begin() + chunk_size * i;
+      auto input_end = input.begin() + chunk_size * (i + 1);
+      auto output_begin = output_thrust.begin() + chunk_size * i;
 
-    thrust::copy_if(thrust::cuda::par.on(infos[i].stream), input_begin,
+      if (i == num_gpus - 1)
+        input_end = input.end();
+
+      thrust::copy_if(thrust::cuda::par.on(infos[i].stream), input_begin,
                     input_end, output_begin, fn);
-    cudaEventRecord(infos[i].event, infos[i].stream);
+      cudaEventRecord(infos[i].event, infos[i].stream);
+    }));
   }
+  
+  for (auto &thread: threads)
+    thread.join ();
 
   for (int i = 0; i < num_gpus; i++)
     cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  for (int i = 0; i < num_gpus; i++) {
-    cudaSetDevice(i);
-    cudaDeviceSynchronize();
-  }
+
+  cudaStreamSynchronize(master_stream);
+
   nvtxRangePop();
-
-  // // --
-  // // Kernel
-
-  // cudaSetDevice(0);
-
-  // nvtxRangePushA("kernel_work");
-  // for(int i = 0 ; i < num_gpus ; i++) {
-  //   cudaSetDevice(i);
-  //   fn_kernel<<<(n + 255) / 256, 256, 0, infos[i].stream>>>(
-  //     n,
-  //     input.data().get(),
-  //     output_kernel.data().get()
-  //   );
-
-  //   cudaEventRecord(infos[i].event, infos[i].stream);
-  // }
-
-  // for(int i = 0; i < num_gpus; i++) cudaStreamWaitEvent(master_stream,
-  // infos[i].event, 0); for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i);
-  // cudaDeviceSynchronize();} nvtxRangePop();
 
   thrust::host_vector<int> ttmp = output_thrust;
   thrust::copy(ttmp.begin(), ttmp.begin() + 40,
                std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
-
-  // thrust::host_vector<int> ktmp = output_kernel;
-  // thrust::copy(ktmp.begin(), ktmp.begin() + 40,
-  // std::ostream_iterator<int>(std::cout, " ")); std::cout << std::endl;
 }
 
 int main(int argc, char** argv) {
