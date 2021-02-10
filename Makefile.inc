@@ -14,7 +14,7 @@ INC         = $(CUDA_CPP) $(CUDA_INC)
 
 NVCCFLAGS   += -std=c++14 -lnvToolsExt
 NVCCFLAGS   += $(SM_TARGETS)
-NVCCFLAGS   += --expt-extended-lambda --expt-relaxed-constexpr --use_fast_math --ptxas-options -v --relocatable-device-code true
+NVCCFLAGS   += --expt-extended-lambda --expt-relaxed-constexpr --use_fast_math --relocatable-device-code true
 
 CXXFLAGS    += -std=c++14 -fopenmp
 CXXFLAGS    += -Wall
