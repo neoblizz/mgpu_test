@@ -1,10 +1,11 @@
-#include <thread>
 #include <cuda.h>
 #include <nvToolsExt.h>
-#include <omp.h>
+
+#include <cstdlib>  // EXIT_SUCCESS
+#include <thread>   // Multi-Threaded Support
+
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
-#include <cstdlib>  // EXIT_SUCCESS
 
 template <typename type_t>
 class physical_memory {
@@ -156,9 +157,8 @@ void do_test(int num_arguments, char** argument_array) {
   cudaDeviceSynchronize();
   nvtxRangePushA("thrust_work");
   std::vector<std::thread> threads;
-  for(unsigned int i = 0; i < num_gpus; ++i) {
+  for (unsigned int i = 0; i < num_gpus; ++i) {
     threads.push_back(std::thread([&, i]() {
-
       cudaSetDevice(i);
 
       auto input_begin = input.begin() + chunk_size * i;
@@ -169,13 +169,13 @@ void do_test(int num_arguments, char** argument_array) {
         input_end = input.end();
 
       thrust::copy_if(thrust::cuda::par.on(infos[i].stream), input_begin,
-                    input_end, output_begin, fn);
+                      input_end, output_begin, fn);
       cudaEventRecord(infos[i].event, infos[i].stream);
     }));
   }
-  
-  for (auto &thread: threads)
-    thread.join ();
+
+  for (auto& thread : threads)
+    thread.join();
 
   for (int i = 0; i < num_gpus; i++)
     cudaStreamWaitEvent(master_stream, infos[i].event, 0);
