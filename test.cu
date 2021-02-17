@@ -5,23 +5,7 @@
 #include "thrust/device_vector.h"
 
 // #define LOCAL_COPY
-// #define MANAGED_MEMORY
-
-// template <typename T>
-// class chunked_ptr {
-
-//   int num_gpus = 1;
-//   cudaGetDeviceCount(&num_gpus);
-  
-//   T* ptrs[num_gpus];
-//   int n;
-  
-//   chunked_ptr(int n_, T* _ptr) : n(n_) {
-//     auto chunk_size = (n + num_gpus - 1) / num_gpus;
-    
-//   }
-// }
-
+#define MANAGED_MEMORY
 
 void do_test(int num_arguments, char** argument_array) {
   srand(112233);
@@ -37,15 +21,18 @@ void do_test(int num_arguments, char** argument_array) {
   thrust::host_vector<int> h_indptr(n_rows + 1);
   thrust::host_vector<int> h_indices(n_rows * degree);
   thrust::host_vector<int> h_data(n_cols);
+  thrust::host_vector<int> h_color(n_rows + 1);
   
   h_indptr[0] = 0;
   for(int i = 1; i < n_rows + 1; i++)      h_indptr[i]  = h_indptr[i - 1] + degree;
   for(int i = 0; i < n_rows * degree; i++) h_indices[i] = rand() % n_cols;
   for(int i = 0; i < n_cols; i++)          h_data[i]    = rand() % max_val;
+  for(int i = 0; i < n_rows + 1; i++)      h_color[i]   = -1;
 
   thrust::device_vector<int> indptr  = h_indptr;
   thrust::device_vector<int> indices = h_indices;
   thrust::device_vector<int> data    = h_data;
+  thrust::device_vector<int> color   = h_color;
 
 
 #ifdef MANAGED_MEMORY
@@ -61,12 +48,15 @@ void do_test(int num_arguments, char** argument_array) {
   int* g_data_ptr;
   cudaMallocManaged(&g_data_ptr, h_data.size() * sizeof(int));
   cudaMemcpy(g_data_ptr, data.data().get(), h_data.size() * sizeof(int), cudaMemcpyDeviceToDevice);
+  
+  int* g_color_ptr   = color.data().get();
 
 #else
 
   int* g_indptr_ptr  = indptr.data().get();
   int* g_indices_ptr = indices.data().get();
   int* g_data_ptr    = data.data().get();
+  int* g_color_ptr   = color.data().get();
   
 #endif
   
@@ -187,9 +177,10 @@ void do_test(int num_arguments, char** argument_array) {
       int* indptr_ptr  = g_indptr_ptr;
       int* indices_ptr = g_indices_ptr;
       int* data_ptr    = g_data_ptr;
+      int* color_ptr   = g_color_ptr;
   #endif
 
-      auto fn = [indptr_ptr, indices_ptr, data_ptr] __host__ __device__(int const& i) -> bool {      
+      auto fn = [indptr_ptr, indices_ptr, data_ptr, color_ptr] __host__ __device__(int const& i) -> bool {      
         int start  = indptr_ptr[i];
         int end    = indptr_ptr[i + 1];
         int degree = end - start;
@@ -199,7 +190,9 @@ void do_test(int num_arguments, char** argument_array) {
           int idx = indices_ptr[start + i];
           acc += data_ptr[idx];
         }
-        return acc % 2 == 0;
+        bool val = acc % 2 == 0;
+        color_ptr[i] = (int)val;
+        return val;
       };
       
       auto input_begin  = input.begin() + chunk_size * i;
@@ -259,9 +252,14 @@ void do_test(int num_arguments, char** argument_array) {
     
     nvtxRangePop();
 
-    thrust::host_vector<int> ttmp = input;
-    thrust::copy(ttmp.begin(), ttmp.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
+    thrust::host_vector<int> r_input = input;
+    thrust::copy(r_input.begin(), r_input.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
     std::cout << std::endl;
+
+    thrust::host_vector<int> r_color = color;
+    thrust::copy(r_color.begin(), r_color.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
+    std::cout << std::endl;
+
   }
 }
 
