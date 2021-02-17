@@ -3,35 +3,14 @@
 
 #include <cstdlib>  // EXIT_SUCCESS
 #include "omp.h"
-#include <chrono>
 #include "nvToolsExt.h"
 #include "thrust/host_vector.h"
 #include "thrust/device_vector.h"
 
+#include <thrust/iterator/counting_iterator.h>
+#include "thrust/random.h"
+
 #define MANAGED
-
-using namespace std::chrono;
-
-int n_rows;
-int n_cols;
-int n_nnz;
-
-int* h_indptr;
-int* h_indices;
-float* h_data;
-
-int* g_indptr;
-int* g_indices;
-float* g_data;
-
-struct gpu_info {
-  cudaStream_t stream;
-  cudaEvent_t  event;
-};
-
-std::vector<gpu_info> infos;
-
-cudaStream_t master_stream;
 
 struct my_timer_t {
   float time;
@@ -65,6 +44,40 @@ struct my_timer_t {
  private:
   cudaEvent_t start_, stop_;
 };
+
+template <typename index_t, typename iterator_t>
+void uniform_distribution(index_t begin, index_t end, iterator_t input) {
+  using type_t = typename std::iterator_traits<iterator_t>::value_type;
+
+  auto generate_random = [] __device__(int i) -> type_t {
+    thrust::default_random_engine rng;
+    rng.discard(i);
+    return rng();
+  };
+  
+  thrust::transform(thrust::make_counting_iterator(begin), thrust::make_counting_iterator(end), input, generate_random);
+}
+
+int n_rows;
+int n_cols;
+int n_nnz;
+
+int* h_indptr;
+int* h_indices;
+float* h_data;
+
+int* g_indptr;
+int* g_indices;
+float* g_data;
+
+struct gpu_info {
+  cudaStream_t stream;
+  cudaEvent_t  event;
+};
+
+std::vector<gpu_info> infos;
+
+cudaStream_t master_stream;
 
 int get_num_gpus() {
   int num_gpus = -1;
@@ -143,9 +156,7 @@ void read_binary(std::string filename) {
 }
 
 void do_test() {
-  
-  int num_gpus    = get_num_gpus();
-  int chunk_size  = (n_rows + num_gpus - 1) / num_gpus;
+  int num_gpus = get_num_gpus();
 
   // --
   // initialize frontier
@@ -161,18 +172,19 @@ void do_test() {
   // --
   // initialize data structures
   
-//   int* h_color = (int*)malloc(n_rows * sizeof(int));
+  thrust::device_vector<int> d_colors;
+  d_colors.resize(n_rows);
+  thrust::fill(thrust::device, d_colors.begin(), d_colors.end(), -1);
+
+  thrust::device_vector<int> d_randoms;
+  d_randoms.resize(n_rows);
+  uniform_distribution(0, n_rows, d_randoms.begin());
   
-//   int* g_color;
-// #ifdef MANAGED
-//   cudaMallocManaged(&g_color, n_rows * sizeof(int));
-// #else
-//   cudaMalloc(&g_color, n_rows * sizeof(int));
-// #endif
-//   cudaMemcpy(g_color, h_color, n_rows * sizeof(int), cudaMemcpyHostToDevice);
-  
+  int* colors  = d_colors.data().get();
+  int* randoms = d_randoms.data().get();
+
   // --
-  // Run
+  // run
   
   cudaSetDevice(0);  
   cudaDeviceSynchronize();
@@ -182,27 +194,47 @@ void do_test() {
   int* indptr  = g_indptr;
   int* indices = g_indices;
   float* data  = g_data;
-  // int* color   = g_color;
   
   nvtxRangePushA("thrust_work");
   
+  int iteration = 0;
+while(input.size() > 4) {
+  
+  int chunk_size  = (input.size() + num_gpus - 1) / num_gpus;
+  
   #pragma omp parallel for num_threads(num_gpus)
   for(int i = 0 ; i < num_gpus ; i++) {
+    
     cudaSetDevice(i);
 
-    auto fn = [indptr, indices, data] __host__ __device__(int const& i) -> bool {      
-      int start  = indptr[i];
-      int end    = indptr[i + 1];
-      int degree = end - start;
-      
-      int acc = 0;
-      for(int i = 0; i < degree; i++) {
-        int idx = indices[start + i];
-        acc += (int)data[idx];
+    auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) -> bool {
+      int start_edge    = indptr[vertex];
+      int num_neighbors = indptr[vertex + 1] - indptr[vertex];
+
+      bool colormax = true;
+      bool colormin = true;
+      int color     = iteration * 2;
+
+      for (int e = start_edge; e < start_edge + num_neighbors; ++e) {
+        int u = indices[e];
+
+        if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
+          continue;
+        if (randoms[vertex] <= randoms[u])
+          colormax = false;
+        if (randoms[vertex] >= randoms[u])
+          colormin = false;
       }
-      bool val = acc % 2 == 0;
-      // color[i] = (int)val;
-      return val;
+
+      if (colormax) {
+        colors[vertex] = color + 1;
+        return false;
+      } else if (colormin) {
+        colors[vertex] = color + 2;
+        return false;
+      } else {
+        return true;
+      }
     };
     
     auto input_begin  = input.begin() + chunk_size * i;
@@ -246,22 +278,25 @@ void do_test() {
     
     cudaEventRecord(infos[i].event, infos[i].stream);
   }
-  
+    
   for(int i = 0; i < num_gpus; i++)
     cudaStreamWaitEvent(master_stream, infos[i].event, 0);
   
   cudaStreamSynchronize(master_stream);
   
   input.resize(total_length);
+  output.resize(total_length);
+    
+  iteration++;
+}
   nvtxRangePop();
   
   // Log
-  thrust::host_vector<int> r_input = input;
-  thrust::copy(r_input.begin(), r_input.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
+  thrust::host_vector<int> out = d_colors;
+  thrust::copy(out.begin(), out.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
   
   cudaSetDevice(0);
-  cudaStreamSynchronize(master_stream);
 }
 
 int main(int argc, char** argv) {

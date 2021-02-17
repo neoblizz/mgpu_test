@@ -1,15 +1,11 @@
 include Makefile.inc
 
-APP = test
+all: test color
 
-test: bin/$(APP)
-
-bin/$(APP) : $(APP).cu $(DEPS)
+test : test.cu $(DEPS)
 	mkdir -p bin
-	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCOPT} --compiler-options "${CXXFLAGS} ${CXXOPT}" -o bin/$(APP) $(APP).cu $(SOURCE) $(ARCH) $(INC)
+	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCOPT} --compiler-options "${CXXFLAGS} ${CXXOPT}" -o bin/test test.cu $(SOURCE) $(ARCH) $(INC)
 
-debug : $(APP).cu $(DEPS)
+color : color.cu $(DEPS)
 	mkdir -p bin
-	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCDEBUG} --compiler-options "${CXXFLAGS} ${CXXDEBUG}" -o bin/$(APP) $(APP).cu $(SOURCE) $(ARCH) $(INC)
-
-.DEFAULT_GOAL := test
+	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCOPT} --compiler-options "${CXXFLAGS} ${CXXOPT}" -o bin/color color.cu $(SOURCE) $(ARCH) $(INC)
