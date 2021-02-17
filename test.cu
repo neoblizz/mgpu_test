@@ -11,19 +11,26 @@ void do_test(int num_arguments, char** argument_array) {
   // --
   // Create data
   
-  int n = 16;
+  int n = 1000000;
   
   thrust::host_vector<int> h_input(n);
+  thrust::host_vector<int> h_data(n);
   thrust::host_vector<int> h_output(n);
   
-  for(int i = 0; i < n; i++) 
+  for(int i = 0; i < n; i++)
     h_input[i] = rand() % 1000000;
+  
+  for(int i = 0; i < n; i++)
+    h_data[i]  = rand() % 1000000;
   
   thrust::fill(thrust::host, h_output.begin(), h_output.end(), -1);
 
   thrust::device_vector<int> input  = h_input;
+  thrust::device_vector<int> data   = h_data;
   thrust::device_vector<int> output = h_output;
-
+  
+  int* data_ptr = data.data().get();
+  
   // --
   // Setup data
   
@@ -71,10 +78,10 @@ void do_test(int num_arguments, char** argument_array) {
   
   cudaSetDevice(0);  
   
-  auto fn = [=] __host__ __device__(int const& i) -> bool {
+  auto fn = [data_ptr] __host__ __device__(int const& i) -> bool {
     int acc = 0;
     for(int ii = 0; ii < i; ii++)
-      acc += ii;
+      acc += data_ptr[ii];
     
     return (i + acc) % 2 == 0;
   };
@@ -147,11 +154,11 @@ void do_test(int num_arguments, char** argument_array) {
   nvtxRangePop();
 
   thrust::host_vector<int> tmp = output;
-  thrust::copy(tmp.begin(), tmp.end(), std::ostream_iterator<int>(std::cout, " "));
+  thrust::copy(tmp.begin(), tmp.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
 
   thrust::host_vector<int> ttmp = input;
-  thrust::copy(ttmp.begin(), ttmp.end(), std::ostream_iterator<int>(std::cout, " "));
+  thrust::copy(ttmp.begin(), ttmp.begin() + 32, std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
 }
 
