@@ -4,7 +4,8 @@
 #include "thrust/host_vector.h"
 #include "thrust/device_vector.h"
 
-#define LOCAL_COPY
+// #define LOCAL_COPY
+// #define MANAGED_MEMORY
 
 // template <typename T>
 // class chunked_ptr {
@@ -46,9 +47,28 @@ void do_test(int num_arguments, char** argument_array) {
   thrust::device_vector<int> indices = h_indices;
   thrust::device_vector<int> data    = h_data;
 
+
+#ifdef MANAGED_MEMORY
+
+  int* g_indptr_ptr;
+  cudaMallocManaged(&g_indptr_ptr, h_indptr.size() * sizeof(int));
+  cudaMemcpy(g_indptr_ptr, indptr.data().get(), h_indptr.size() * sizeof(int), cudaMemcpyDeviceToDevice);
+  
+  int* g_indices_ptr;
+  cudaMallocManaged(&g_indices_ptr, h_indices.size() * sizeof(int));
+  cudaMemcpy(g_indices_ptr, indices.data().get(), h_indices.size() * sizeof(int), cudaMemcpyDeviceToDevice);
+  
+  int* g_data_ptr;
+  cudaMallocManaged(&g_data_ptr, h_data.size() * sizeof(int));
+  cudaMemcpy(g_data_ptr, data.data().get(), h_data.size() * sizeof(int), cudaMemcpyDeviceToDevice);
+
+#else
+
   int* g_indptr_ptr  = indptr.data().get();
   int* g_indices_ptr = indices.data().get();
   int* g_data_ptr    = data.data().get();
+  
+#endif
   
   // --
   // Setup data
@@ -65,6 +85,14 @@ void do_test(int num_arguments, char** argument_array) {
       cudaDeviceEnablePeerAccess(j, 0);
     }
   }
+
+#ifdef MANAGED_MEMORY
+  for(int i = 0; i < num_gpus; i++) {
+    cudaMemAdvise(g_indptr_ptr, h_indptr.size() * sizeof(int), cudaMemAdviseSetReadMostly, i);
+    cudaMemAdvise(g_indices_ptr, h_indices.size() * sizeof(int), cudaMemAdviseSetReadMostly, i);
+    cudaMemAdvise(g_data_ptr, h_data.size() * sizeof(int), cudaMemAdviseSetReadMostly, i);
+  }
+#endif
   
 #ifdef LOCAL_COPY
   // Copy the datastructures to local GPUs
