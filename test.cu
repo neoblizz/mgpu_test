@@ -3,14 +3,11 @@
 
 #include <cstdlib>  // EXIT_SUCCESS
 #include "omp.h"
-#include <chrono>
 #include "nvToolsExt.h"
 #include "thrust/host_vector.h"
 #include "thrust/device_vector.h"
 
 #define MANAGED
-
-using namespace std::chrono;
 
 int n_rows;
 int n_cols;
@@ -161,49 +158,75 @@ void do_test() {
   // --
   // initialize data structures
   
-//   int* h_color = (int*)malloc(n_rows * sizeof(int));
+  thrust::device_vector<int> d_colors;
+  d_colors.resize(n_rows);
+  thrust::fill(thrust::device, d_colors.begin(), d_colors.end(), -1);
+
+  int* h_randoms = (int*)malloc(n_rows * sizeof(int));
+  for(int i = 0; i < n_rows; i++) h_randoms[i] = rand() % n_rows;
   
-//   int* g_color;
-// #ifdef MANAGED
-//   cudaMallocManaged(&g_color, n_rows * sizeof(int));
-// #else
-//   cudaMalloc(&g_color, n_rows * sizeof(int));
-// #endif
-//   cudaMemcpy(g_color, h_color, n_rows * sizeof(int), cudaMemcpyHostToDevice);
-  
+  int* randoms;
+  cudaMallocManaged(&randoms, n_rows * sizeof(int));
+  cudaMemcpy(randoms, h_randoms, n_rows * sizeof(int), cudaMemcpyHostToDevice);
+#ifdef MANAGED
+  for(int i = 0; i < num_gpus; i++)
+    cudaMemAdvise(randoms, n_rows * sizeof(int), cudaMemAdviseSetReadMostly, i);
+#endif
+
+  int* colors  = d_colors.data().get();
+
   // --
   // Run
-  
+
   cudaSetDevice(0);  
   cudaDeviceSynchronize();
+  my_timer_t t;
+  t.begin();
   
   int new_sizes[num_gpus];
   
   int* indptr  = g_indptr;
   int* indices = g_indices;
   float* data  = g_data;
-  // int* color   = g_color;
   
   nvtxRangePushA("thrust_work");
+  
+  int iteration = 0;
   
   #pragma omp parallel for num_threads(num_gpus)
   for(int i = 0 ; i < num_gpus ; i++) {
     cudaSetDevice(i);
 
-    auto fn = [indptr, indices, data] __host__ __device__(int const& i) -> bool {      
-      int start  = indptr[i];
-      int end    = indptr[i + 1];
+    auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) -> bool {      
+      int start  = indptr[vertex];
+      int end    = indptr[vertex + 1];
       int degree = end - start;
+
+      bool colormax = true;
+      bool colormin = true;
+      int color     = iteration * 2;
       
-      int acc = 0;
       for(int i = 0; i < degree; i++) {
-        int idx = indices[start + i];
-        acc += (int)data[idx];
+        int u = indices[start + i];
+        
+        if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
+          continue;
+        if (randoms[vertex] <= randoms[u])
+          colormax = false;
+        if (randoms[vertex] >= randoms[u])
+          colormin = false;
+                
       }
       
-      bool val = acc % 2 == 0;
-      // color[i] = (int)val;
-      return val;
+      if (colormax) {
+        colors[vertex] = color + 1;
+        return false;
+      } else if (colormin) {
+        colors[vertex] = color + 2;
+        return false;
+      } else {
+        return true;
+      }
     };
     
     auto input_begin  = input.begin() + chunk_size * i;
@@ -233,27 +256,23 @@ void do_test() {
   for(int i = 0 ; i < num_gpus ; i++) total_length += new_sizes[i];
 
   // Reduce
-  #pragma omp parallel for num_threads(num_gpus)
+  cudaSetDevice(0);
   for(int i = 0; i < num_gpus; i++) {
-    cudaSetDevice(i);
-
     auto output_begin = output.begin() + chunk_size * i;
     thrust::copy_n(
-      thrust::cuda::par.on(infos[i].stream),
+      thrust::cuda::par.on(infos[0].stream),
       output_begin, 
       new_sizes[i], 
       input.begin() + offsets[i]
     );
-    
-    cudaEventRecord(infos[i].event, infos[i].stream);
   }
   
-  for(int i = 0; i < num_gpus; i++)
-    cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  
+  cudaEventRecord(infos[0].event, infos[0].stream);
+  cudaStreamWaitEvent(master_stream, infos[0].event, 0);
   cudaStreamSynchronize(master_stream);
   
   input.resize(total_length);
+  
   nvtxRangePop();
   
   // Log
@@ -262,7 +281,10 @@ void do_test() {
   std::cout << std::endl;
   
   cudaSetDevice(0);
-  cudaStreamSynchronize(master_stream);
+  
+  t.end();  
+  std::cout << "elapsed: " << t.milliseconds() << std::endl;
+
 }
 
 int main(int argc, char** argv) {
@@ -273,17 +295,12 @@ int main(int argc, char** argv) {
   read_binary(inpath);
 
   int num_gpus = get_num_gpus();
-
-  my_timer_t t;
-  t.begin();
+  std::cout << "test | num_gpus: " << num_gpus << std::endl;
   
   int num_iters = 4;
   for(int i = 0; i < num_iters; i++)
     do_test();
   
-  t.end();
-  
-  std::cout << "elapsed: " << t.milliseconds() << std::endl;
-  
+  std::cout << "-----" << std::endl;
   return EXIT_SUCCESS;
 }

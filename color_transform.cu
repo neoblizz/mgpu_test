@@ -216,7 +216,7 @@ void do_test() {
   cudaSetDevice(0);  
   cudaDeviceSynchronize();
   
-  int new_sizes[num_gpus];
+  // int new_sizes[num_gpus];
   
   int* indptr  = g_indptr;
   int* indices = g_indices;

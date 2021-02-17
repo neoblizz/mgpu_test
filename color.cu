@@ -12,6 +12,28 @@
 
 #define MANAGED
 
+int n_rows;
+int n_cols;
+int n_nnz;
+
+int* h_indptr;
+int* h_indices;
+float* h_data;
+
+int* g_indptr;
+int* g_indices;
+float* g_data;
+
+struct gpu_info {
+  cudaStream_t stream;
+  cudaEvent_t  event;
+};
+
+std::vector<gpu_info> infos;
+
+cudaStream_t master_stream;
+
+
 struct my_timer_t {
   float time;
 
@@ -57,27 +79,6 @@ void uniform_distribution(index_t begin, index_t end, iterator_t input) {
   
   thrust::transform(thrust::make_counting_iterator(begin), thrust::make_counting_iterator(end), input, generate_random);
 }
-
-int n_rows;
-int n_cols;
-int n_nnz;
-
-int* h_indptr;
-int* h_indices;
-float* h_data;
-
-int* g_indptr;
-int* g_indices;
-float* g_data;
-
-struct gpu_info {
-  cudaStream_t stream;
-  cudaEvent_t  event;
-};
-
-std::vector<gpu_info> infos;
-
-cudaStream_t master_stream;
 
 int get_num_gpus() {
   int num_gpus = -1;
@@ -178,10 +179,6 @@ void do_test() {
   d_colors.resize(n_rows);
   thrust::fill(thrust::device, d_colors.begin(), d_colors.end(), -1);
 
-  // thrust::device_vector<int> d_randoms;
-  // d_randoms.resize(n_rows);
-  // uniform_distribution(0, n_rows, d_randoms.begin());
-  // int* randoms = d_randoms.data().get();
   int* h_randoms = (int*)malloc(n_rows * sizeof(int));
   for(int i = 0; i < n_rows; i++) h_randoms[i] = rand() % n_rows;
   
@@ -195,13 +192,14 @@ void do_test() {
 
   int* colors  = d_colors.data().get();
   
-
   // --
-  // run
+  // Run
   
   cudaSetDevice(0);  
   cudaDeviceSynchronize();
-  
+  my_timer_t t;
+  t.begin();
+
   int new_sizes[num_gpus];
   
   int* indptr  = g_indptr;
@@ -211,98 +209,95 @@ void do_test() {
   nvtxRangePushA("thrust_work");
   
   int iteration = 0;
-while(input.size() > 4) {
+  while(input.size() > 4) {
 
-  int chunk_size  = (input.size() + num_gpus - 1) / num_gpus;
-  
-  #pragma omp parallel for num_threads(num_gpus)
-  for(int i = 0 ; i < num_gpus ; i++) {
+    int chunk_size  = (input.size() + num_gpus - 1) / num_gpus;
     
-    cudaSetDevice(i);
+    #pragma omp parallel for num_threads(num_gpus)
+    for(int i = 0 ; i < num_gpus ; i++) {
+      
+      cudaSetDevice(i);
 
-    auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) -> bool {
-      int start  = indptr[vertex];
-      int end    = indptr[vertex + 1];
-      int degree = end - start;
+      auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) -> bool {
+        int start  = indptr[vertex];
+        int end    = indptr[vertex + 1];
+        int degree = end - start;
 
-      bool colormax = true;
-      bool colormin = true;
-      int color     = iteration * 2;
+        bool colormax = true;
+        bool colormin = true;
+        int color     = iteration * 2;
 
-      for (int i = 0; i < degree; i++) {
-        int u = indices[start + i];
+        for (int i = 0; i < degree; i++) {
+          int u = indices[start + i];
 
-        if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
-          continue;
-        if (randoms[vertex] <= randoms[u])
-          colormax = false;
-        if (randoms[vertex] >= randoms[u])
-          colormin = false;
-      }
+          if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
+            continue;
+          if (randoms[vertex] <= randoms[u])
+            colormax = false;
+          if (randoms[vertex] >= randoms[u])
+            colormin = false;
+        }
 
-      if (colormax) {
-        colors[vertex] = color + 1;
-        return false;
-      } else if (colormin) {
-        colors[vertex] = color + 2;
-        return false;
-      } else {
-        return true;
-      }
-    };
+        if (colormax) {
+          colors[vertex] = color + 1;
+          return false;
+        } else if (colormin) {
+          colors[vertex] = color + 2;
+          return false;
+        } else {
+          return true;
+        }
+      };
+      
+      auto input_begin  = input.begin() + chunk_size * i;
+      auto input_end    = input.begin() + chunk_size * (i + 1);
+      auto output_begin = output.begin() + chunk_size * i;
+      if(i == num_gpus - 1) input_end = input.end();
+      
+      auto new_output_end = thrust::copy_if(
+        thrust::cuda::par.on(infos[i].stream),
+        input_begin,
+        input_end,
+        output_begin,
+        fn
+      );
+      new_sizes[i] = (int)thrust::distance(output_begin, new_output_end);
+      cudaEventRecord(infos[i].event, infos[i].stream);
+    }
     
-    auto input_begin  = input.begin() + chunk_size * i;
-    auto input_end    = input.begin() + chunk_size * (i + 1);
-    auto output_begin = output.begin() + chunk_size * i;
-    if(i == num_gpus - 1) input_end = input.end();
+    for(int i = 0; i < num_gpus; i++)
+      cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+    cudaStreamSynchronize(master_stream);
     
-    auto new_output_end = thrust::copy_if(
-      thrust::cuda::par.on(infos[i].stream),
-      input_begin,
-      input_end,
-      output_begin,
-      fn
-    );
-    new_sizes[i] = (int)thrust::distance(output_begin, new_output_end);
-    cudaEventRecord(infos[i].event, infos[i].stream);
+    int total_length = 0;
+    int offsets[num_gpus];
+    offsets[0] = 0;
+    for(int i = 1 ; i < num_gpus ; i++) offsets[i] = new_sizes[i - 1] + offsets[i - 1];
+    for(int i = 0 ; i < num_gpus ; i++) total_length += new_sizes[i];
+
+    // Reduce
+    cudaSetDevice(0);
+    for(int i = 0; i < num_gpus; i++) {
+      auto output_begin = output.begin() + chunk_size * i;
+      thrust::copy_n(
+        thrust::cuda::par.on(infos[0].stream),
+        output_begin, 
+        new_sizes[i], 
+        input.begin() + offsets[i]
+      );
+    }
+    
+    cudaEventRecord(infos[0].event, infos[0].stream);
+    cudaStreamWaitEvent(master_stream, infos[0].event, 0);
+    cudaStreamSynchronize(master_stream);
+    
+    input.resize(total_length);
+    output.resize(total_length);
+      
+    iteration++;
+    t.end();  
+    std::cout << "elapsed: " << t.milliseconds() << std::endl;
   }
-  
-  for(int i = 0; i < num_gpus; i++)
-    cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  cudaStreamSynchronize(master_stream);
-  
-  int total_length = 0;
-  int offsets[num_gpus];
-  offsets[0] = 0;
-  for(int i = 1 ; i < num_gpus ; i++) offsets[i] = new_sizes[i - 1] + offsets[i - 1];
-  for(int i = 0 ; i < num_gpus ; i++) total_length += new_sizes[i];
-
-  // Reduce
-  #pragma omp parallel for num_threads(num_gpus)
-  for(int i = 0; i < num_gpus; i++) {
-    cudaSetDevice(i);
-
-    auto output_begin = output.begin() + chunk_size * i;
-    thrust::copy_n(
-      thrust::cuda::par.on(infos[i].stream),
-      output_begin, 
-      new_sizes[i], 
-      input.begin() + offsets[i]
-    );
-    
-    cudaEventRecord(infos[i].event, infos[i].stream);
-  }
-  
-  for(int i = 0; i < num_gpus; i++)
-    cudaStreamWaitEvent(master_stream, infos[i].event, 0);
-  
-  cudaStreamSynchronize(master_stream);
-  
-  input.resize(total_length);
-  output.resize(total_length);
-    
-  iteration++;
-}
   nvtxRangePop();
   
   // Log
@@ -311,6 +306,8 @@ while(input.size() > 4) {
   std::cout << std::endl;
   
   cudaSetDevice(0);
+  t.end();  
+  std::cout << "total_elapsed: " << t.milliseconds() << std::endl;
 }
 
 int main(int argc, char** argv) {
@@ -321,17 +318,12 @@ int main(int argc, char** argv) {
   read_binary(inpath);
 
   int num_gpus = get_num_gpus();
+  std::cout << "color | num_gpus: " << num_gpus << std::endl;
 
-  my_timer_t t;
-  t.begin();
-  
   int num_iters = 4;
   for(int i = 0; i < num_iters; i++)
     do_test();
   
-  t.end();
-  
-  std::cout << "elapsed: " << t.milliseconds() << std::endl;
-  
+  std::cout << "-----" << std::endl;
   return EXIT_SUCCESS;
 }
