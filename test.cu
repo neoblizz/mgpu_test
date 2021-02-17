@@ -11,7 +11,7 @@ void do_test(int num_arguments, char** argument_array) {
   // --
   // Create data
   
-  int n = 1000000; // !!
+  int n = 16;
   
   thrust::host_vector<int> h_input(n);
   thrust::host_vector<int> h_output(n);
@@ -81,7 +81,10 @@ void do_test(int num_arguments, char** argument_array) {
   
   cudaDeviceSynchronize();
   
+  int new_sizes[num_gpus];
+  
   nvtxRangePushA("thrust_work");
+  
   #pragma omp parallel for num_threads(num_gpus)
   for(int i = 0 ; i < num_gpus ; i++) {
     cudaSetDevice(i);
@@ -93,24 +96,59 @@ void do_test(int num_arguments, char** argument_array) {
     if(i == num_gpus - 1)
       input_end = input.end();
     
-    thrust::copy_if(
+    auto new_output_end = thrust::copy_if(
       thrust::cuda::par.on(infos[i].stream),
       input_begin,
       input_end,
       output_begin,
       fn
     );
+    new_sizes[i] = (int)thrust::distance(output_begin, new_output_end);
     cudaEventRecord(infos[i].event, infos[i].stream);
   }
   
   for(int i = 0; i < num_gpus; i++)
     cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+  cudaStreamSynchronize(master_stream);
   
+  int total_length = 0;
+  int offsets[num_gpus];
+  offsets[0] = 0;
+  for(int i = 1 ; i < num_gpus ; i++) offsets[i] = new_sizes[i - 1] + offsets[i - 1];
+  for(int i = 0 ; i < num_gpus ; i++) total_length += new_sizes[i];
+
+  // Reduce
+  #pragma omp parallel for num_threads(num_gpus)
+  for(int i = 0; i < num_gpus; i++) {
+    cudaSetDevice(i);
+
+    auto output_begin = output.begin() + chunk_size * i;
+    thrust::copy_n(
+      thrust::cuda::par.on(infos[i].stream),
+      output_begin, 
+      new_sizes[i], 
+      input.begin() + offsets[i]
+    );
+    
+    cudaEventRecord(infos[i].event, infos[i].stream);
+  }
+  
+  for(int i = 0; i < num_gpus; i++)
+    cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+  cudaStreamSynchronize(master_stream);
+
   for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
+  
+  input.resize(total_length);
+  
   nvtxRangePop();
 
-  thrust::host_vector<int> ttmp = output;
-  thrust::copy(ttmp.begin(), ttmp.begin() + 100, std::ostream_iterator<int>(std::cout, " "));
+  thrust::host_vector<int> tmp = output;
+  thrust::copy(tmp.begin(), tmp.end(), std::ostream_iterator<int>(std::cout, " "));
+  std::cout << std::endl;
+
+  thrust::host_vector<int> ttmp = input;
+  thrust::copy(ttmp.begin(), ttmp.end(), std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
 
 
