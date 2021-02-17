@@ -200,6 +200,7 @@ void do_test() {
         int idx = indices[start + i];
         acc += (int)data[idx];
       }
+      
       bool val = acc % 2 == 0;
       // color[i] = (int)val;
       return val;

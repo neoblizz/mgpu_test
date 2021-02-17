@@ -156,6 +156,8 @@ void read_binary(std::string filename) {
 }
 
 void do_test() {
+  srand(123123123);
+  
   int num_gpus = get_num_gpus();
 
   // --
@@ -176,12 +178,23 @@ void do_test() {
   d_colors.resize(n_rows);
   thrust::fill(thrust::device, d_colors.begin(), d_colors.end(), -1);
 
-  thrust::device_vector<int> d_randoms;
-  d_randoms.resize(n_rows);
-  uniform_distribution(0, n_rows, d_randoms.begin());
+  // thrust::device_vector<int> d_randoms;
+  // d_randoms.resize(n_rows);
+  // uniform_distribution(0, n_rows, d_randoms.begin());
+  // int* randoms = d_randoms.data().get();
+  int* h_randoms = (int*)malloc(n_rows * sizeof(int));
+  for(int i = 0; i < n_rows; i++) h_randoms[i] = rand() % n_rows;
   
+  int* randoms;
+  cudaMallocManaged(&randoms, n_rows * sizeof(int));
+  cudaMemcpy(randoms, h_randoms, n_rows * sizeof(int), cudaMemcpyHostToDevice);
+#ifdef MANAGED
+  for(int i = 0; i < num_gpus; i++)
+    cudaMemAdvise(randoms, n_rows * sizeof(int), cudaMemAdviseSetReadMostly, i);
+#endif
+
   int* colors  = d_colors.data().get();
-  int* randoms = d_randoms.data().get();
+  
 
   // --
   // run
@@ -208,15 +221,16 @@ while(input.size() > 4) {
     cudaSetDevice(i);
 
     auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) -> bool {
-      int start_edge    = indptr[vertex];
-      int num_neighbors = indptr[vertex + 1] - indptr[vertex];
+      int start  = indptr[vertex];
+      int end    = indptr[vertex + 1];
+      int degree = end - start;
 
       bool colormax = true;
       bool colormin = true;
       int color     = iteration * 2;
 
-      for (int e = start_edge; e < start_edge + num_neighbors; ++e) {
-        int u = indices[e];
+      for (int i = 0; i < degree; i++) {
+        int u = indices[start + i];
 
         if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
           continue;
