@@ -135,9 +135,12 @@ void do_test(int num_arguments, char** argument_array) {
   
   for(int i = 0; i < num_gpus; i++)
     cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+  
   cudaStreamSynchronize(master_stream);
 
-  for(int i = 0; i < num_gpus; i++) {cudaSetDevice(i); cudaDeviceSynchronize();}
+  for(int i = 0; i < num_gpus; i++) {
+    cudaSetDevice(i); cudaDeviceSynchronize();
+  }
   
   input.resize(total_length);
   
@@ -150,8 +153,6 @@ void do_test(int num_arguments, char** argument_array) {
   thrust::host_vector<int> ttmp = input;
   thrust::copy(ttmp.begin(), ttmp.end(), std::ostream_iterator<int>(std::cout, " "));
   std::cout << std::endl;
-
-
 }
 
 int main(int argc, char** argv) {
