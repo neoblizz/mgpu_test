@@ -3,6 +3,8 @@
 
 #include <cstdlib>  // EXIT_SUCCESS
 #include "omp.h"
+#include <algorithm>
+#include <random>
 #include "nvToolsExt.h"
 #include "thrust/host_vector.h"
 #include "thrust/device_vector.h"
@@ -151,6 +153,10 @@ void read_binary(std::string filename) {
     cudaMemAdvise(g_indptr, (n_rows + 1) * sizeof(int), cudaMemAdviseSetReadMostly, i);
     cudaMemAdvise(g_indices, n_nnz * sizeof(int), cudaMemAdviseSetReadMostly, i);
     cudaMemAdvise(g_data, n_nnz * sizeof(float), cudaMemAdviseSetReadMostly, i);
+    
+    cudaMemPrefetchAsync(g_indptr, (n_rows + 1) * sizeof(int), i);
+    cudaMemPrefetchAsync(g_indices, n_nnz * sizeof(int), i);
+    cudaMemPrefetchAsync(g_data, n_nnz * sizeof(float), i);
   }
 #endif  
 }
@@ -163,9 +169,15 @@ void do_test() {
   // --
   // initialize frontier
   
+  std::vector<int> tmp;
+  for(int i = 0; i < n_rows; i++) tmp.push_back(i);
+  std::random_device rd;
+  std::mt19937 g(rd());
+  std::shuffle(tmp.begin(), tmp.end(), g);
+  
   thrust::host_vector<int> h_input(n_rows);
   thrust::host_vector<int> h_output(n_rows);
-  for(int i = 0; i < n_rows; i++) h_input[i] = i;
+  for(int i = 0; i < n_rows; i++) h_input[i] = tmp[i];
   for(int i = 0; i < n_rows; i++) h_output[i] = -1;
 
   thrust::device_vector<int> input   = h_input;
@@ -173,15 +185,18 @@ void do_test() {
   
   // --
   // initialize data structures
+
+  // int* h_colors = (int*)malloc(n_rows * sizeof(int));
+  // for(int i = 0; i < n_rows; i++) h_colors[i] = -1;  
+  // int* colors;
+  // cudaMallocManaged(&colors, n_rows * sizeof(int));
+  // cudaMemcpy(colors, h_colors, n_rows * sizeof(int), cudaMemcpyHostToDevice);
   
   thrust::device_vector<int> d_colors;
   d_colors.resize(n_rows);
   thrust::fill(thrust::device, d_colors.begin(), d_colors.end(), -1);
+  int* colors  = d_colors.data().get();
 
-  // thrust::device_vector<int> d_randoms;
-  // d_randoms.resize(n_rows);
-  // uniform_distribution(0, n_rows, d_randoms.begin());
-  // int* randoms = d_randoms.data().get();
   int* h_randoms = (int*)malloc(n_rows * sizeof(int));
   for(int i = 0; i < n_rows; i++) h_randoms[i] = rand() % n_rows;
   
@@ -189,13 +204,12 @@ void do_test() {
   cudaMallocManaged(&randoms, n_rows * sizeof(int));
   cudaMemcpy(randoms, h_randoms, n_rows * sizeof(int), cudaMemcpyHostToDevice);
 #ifdef MANAGED
-  for(int i = 0; i < num_gpus; i++)
+  for(int i = 0; i < num_gpus; i++) {
     cudaMemAdvise(randoms, n_rows * sizeof(int), cudaMemAdviseSetReadMostly, i);
+    cudaMemPrefetchAsync(randoms, n_rows * sizeof(int), i);
+  }
 #endif
-
-  int* colors  = d_colors.data().get();
   
-
   // --
   // run
   
@@ -211,8 +225,10 @@ void do_test() {
   nvtxRangePushA("thrust_work");
   
   int iteration = 0;
-while(input.size() > 4) {
-
+// while(input.size() > 4) {
+while(iteration < 29) {
+  // printf("iteration: %d\n", iteration);
+  
   int chunk_size  = (input.size() + num_gpus - 1) / num_gpus;
   
   #pragma omp parallel for num_threads(num_gpus)
@@ -220,7 +236,9 @@ while(input.size() > 4) {
     
     cudaSetDevice(i);
 
-    auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) -> bool {
+    auto fn = [indptr, indices, data, colors, randoms, iteration] __host__ __device__(int const& vertex) {
+      if(vertex == -1) return -1;
+      
       int start  = indptr[vertex];
       int end    = indptr[vertex + 1];
       int degree = end - start;
@@ -242,12 +260,12 @@ while(input.size() > 4) {
 
       if (colormax) {
         colors[vertex] = color + 1;
-        return false;
+        return -1;
       } else if (colormin) {
         colors[vertex] = color + 2;
-        return false;
+        return -1;
       } else {
-        return true;
+        return vertex;
       }
     };
     
@@ -256,14 +274,14 @@ while(input.size() > 4) {
     auto output_begin = output.begin() + chunk_size * i;
     if(i == num_gpus - 1) input_end = input.end();
     
-    auto new_output_end = thrust::copy_if(
+    thrust::transform(
       thrust::cuda::par.on(infos[i].stream),
       input_begin,
       input_end,
-      output_begin,
+      input_begin,
       fn
     );
-    new_sizes[i] = (int)thrust::distance(output_begin, new_output_end);
+    // new_sizes[i] = (int)thrust::distance(output_begin, new_output_end);
     cudaEventRecord(infos[i].event, infos[i].stream);
   }
   
@@ -271,35 +289,35 @@ while(input.size() > 4) {
     cudaStreamWaitEvent(master_stream, infos[i].event, 0);
   cudaStreamSynchronize(master_stream);
   
-  int total_length = 0;
-  int offsets[num_gpus];
-  offsets[0] = 0;
-  for(int i = 1 ; i < num_gpus ; i++) offsets[i] = new_sizes[i - 1] + offsets[i - 1];
-  for(int i = 0 ; i < num_gpus ; i++) total_length += new_sizes[i];
+  // int total_length = 0;
+  // int offsets[num_gpus];
+  // offsets[0] = 0;
+  // for(int i = 1 ; i < num_gpus ; i++) offsets[i] = new_sizes[i - 1] + offsets[i - 1];
+  // for(int i = 0 ; i < num_gpus ; i++) total_length += new_sizes[i];
 
-  // Reduce
-  #pragma omp parallel for num_threads(num_gpus)
-  for(int i = 0; i < num_gpus; i++) {
-    cudaSetDevice(i);
+  // // Reduce
+  // #pragma omp parallel for num_threads(num_gpus)
+  // for(int i = 0; i < num_gpus; i++) {
+  //   cudaSetDevice(i);
 
-    auto output_begin = output.begin() + chunk_size * i;
-    thrust::copy_n(
-      thrust::cuda::par.on(infos[i].stream),
-      output_begin, 
-      new_sizes[i], 
-      input.begin() + offsets[i]
-    );
+  //   auto output_begin = output.begin() + chunk_size * i;
+  //   thrust::copy_n(
+  //     thrust::cuda::par.on(infos[i].stream),
+  //     output_begin, 
+  //     new_sizes[i], 
+  //     input.begin() + offsets[i]
+  //   );
     
-    cudaEventRecord(infos[i].event, infos[i].stream);
-  }
+  //   cudaEventRecord(infos[i].event, infos[i].stream);
+  // }
   
-  for(int i = 0; i < num_gpus; i++)
-    cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+  // for(int i = 0; i < num_gpus; i++)
+  //   cudaStreamWaitEvent(master_stream, infos[i].event, 0);
   
-  cudaStreamSynchronize(master_stream);
+  // cudaStreamSynchronize(master_stream);
   
-  input.resize(total_length);
-  output.resize(total_length);
+  // input.resize(total_length);
+  // output.resize(total_length);
     
   iteration++;
 }
@@ -325,7 +343,7 @@ int main(int argc, char** argv) {
   my_timer_t t;
   t.begin();
   
-  int num_iters = 4;
+  int num_iters = 10;
   for(int i = 0; i < num_iters; i++)
     do_test();
   
