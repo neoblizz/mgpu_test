@@ -8,6 +8,8 @@ SM_TARGETS = $(GEN_SM70)
 
 CUB         = -lcub
 CUSPARSE    = -lcusparse
+CUDA_INC    = -I"$(shell dirname $(NVCC))/../include"
+
 
 GUNROCK_DEF = -Xcompiler -DGUNROCKVERSION=2.0.0
 INC         = $(CUDA_CPP) $(CUDA_INC)
