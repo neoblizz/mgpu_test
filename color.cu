@@ -136,8 +136,8 @@ void read_binary(std::string filename) {
   cudaMallocManaged(&g_data,    n_nnz        * sizeof(float));
 
   cudaMemcpy(g_indptr, h_indptr, (n_rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(g_indices, h_indices, (n_rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
-  cudaMemcpy(g_data, h_data, (n_rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(g_indices, h_indices, n_nnz * sizeof(int), cudaMemcpyHostToDevice);
+  cudaMemcpy(g_data, h_data, n_nnz * sizeof(int), cudaMemcpyHostToDevice);
 
   // cudaMemAdviseSetReadMostly: The device argument is ignored for this advice.
   cudaMemAdvise(g_indptr, (n_rows + 1) * sizeof(int), cudaMemAdviseSetReadMostly, 0);
@@ -195,7 +195,7 @@ void do_test() {
   // === cudaMemAdviseSetReadMostly: The device argument is ignored for this advice.
   cudaMemAdvise(randoms, n_rows * sizeof(int), cudaMemAdviseSetReadMostly, 0);
 
-  int partitioned = n_rows + num_gpus - 1 / num_gpus;
+  int partitioned = (n_rows + num_gpus - 1) / num_gpus;
   
   // Prefetch the arrays to all devices:
   #pragma omp parallel for num_threads(num_gpus)
@@ -223,8 +223,8 @@ void do_test() {
     // cudaMemAdvise(colors + partitioned * i, partitioned * sizeof(int), cudaMemAdviseSetAccessedBy, i);
     // cudaMemAdvise(input + partitioned * i, partitioned * sizeof(int), cudaMemAdviseSetAccessedBy, i);
 
-    cudaMemAdvise(colors, n_rows * sizeof(int), cudaMemAdviseSetAccessedBy, i);
-    cudaMemAdvise(input, n_rows * sizeof(int), cudaMemAdviseSetAccessedBy, i);
+    // cudaMemAdvise(colors, n_rows * sizeof(int), cudaMemAdviseSetAccessedBy, i);
+    // cudaMemAdvise(input, n_rows * sizeof(int), cudaMemAdviseSetAccessedBy, i);
 
     // === Prefetch each portion ahead of time.
     // cudaMemPrefetchAsync(colors + partitioned * i, partitioned * sizeof(int), i, 0);

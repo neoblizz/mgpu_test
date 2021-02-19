@@ -24,7 +24,8 @@ int main(int argc, char** argv) {
     for(int i = 0; i < num_gpus; i++)
         devices.push_back(i);
 
-    physical_memory<float> pm(N, devices); // Create physical memory for all devices.
+    std::size_t size = N * sizeof(float);
+    physical_memory<float> pm(size, devices); // Create physical memory for all devices.
     virtual_memory<float> vm(pm.padded_size);
     memory_mapper<float> map(vm, pm, devices);
 
