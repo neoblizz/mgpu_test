@@ -16,5 +16,8 @@ color_transform : color_transform.cu $(DEPS)
 
 memory : memory.cu $(DEPS)
 	mkdir -p bin
-	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCDEBUG} --compiler-options "${CXXFLAGS} ${CXXOPT}" -o bin/memory memory.cu $(SOURCE) $(ARCH) $(INC) -lcuda
+	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCOPT} --compiler-options "${CXXFLAGS} ${CXXOPT}" -o bin/memory memory.cu $(SOURCE) $(ARCH) $(INC) -lcuda
 
+color_mapped : color_mapped.cu $(DEPS)
+	mkdir -p bin
+	$(NVCC) -ccbin=${CXX} ${NVCCFLAGS} ${NVCCOPT} --compiler-options "${CXXFLAGS} ${CXXOPT}" -o bin/color_mapped color_mapped.cu $(SOURCE) $(ARCH) $(INC) -lcuda
