@@ -15,20 +15,29 @@
 
 #include "memory.hxx"
 
-#define FORALL_BLOCKSIZE 256
-#define FORALL_GRIDSIZE 256
+// Use occupancy calculation for better occupancy.
+int minimum_grid_size;
+int max_active_blocks;
+int block_size;
 
-template <typename array_t, typename size_t, typename op_t>
-__global__ void parallel_for(array_t array, 
+template <typename op_t>
+__global__ void parallel_for(int* array, 
                              op_t apply, 
-                             size_t length, 
-                             size_t offset) {
-  const size_t STRIDE = (size_t)blockDim.x * gridDim.x;
-  size_t i = (size_t)blockDim.x * blockIdx.x + threadIdx.x;
-  while (i < length) {
-    // printf("id = %u\n", i + offset);
+                             std::size_t length, 
+                             std::size_t offset) {
+  // const std::size_t STRIDE = (size_t)blockDim.x * gridDim.x;
+  // std::size_t i = (size_t)blockDim.x * blockIdx.x + threadIdx.x;
+  // while (i < length) {
+  //   apply(array[offset + i]);
+  //   i += STRIDE;
+  // }
+
+  // Can be unrolled better, possibly nice for shared_memory optimization.
+  #pragma unroll
+  for(std::size_t i = blockDim.x * blockIdx.x + threadIdx.x; 
+      i < length; 
+      i=i+(blockDim.x * gridDim.x)) {
     apply(array[offset + i]);
-    i += STRIDE;
   }
 }
 
@@ -90,6 +99,21 @@ int get_num_gpus() {
   return num_gpus;
 }
 
+void enable_peer_access() {
+  int num_gpus = get_num_gpus();
+  
+  for(int i = 0; i < num_gpus; i++) {
+    cudaSetDevice(i);
+    for(int j = 0; j < num_gpus; j++) {
+      if(i == j) 
+        continue;
+      cudaDeviceEnablePeerAccess(j, 0);
+    }
+  }
+  
+  cudaSetDevice(0);
+}
+
 void create_contexts() {
   int num_gpus = get_num_gpus();
   
@@ -104,8 +128,33 @@ void create_contexts() {
     cudaEventCreateWithFlags(&info.event, cudaEventDisableTiming);
     infos.push_back(info);
   }
-  
   cudaSetDevice(0);
+}
+
+void occupancy() {
+
+  auto dummy = [=] __device__ (int& vertex) {
+    vertex = -1;
+  };
+  
+  cudaOccupancyMaxPotentialBlockSize(&minimum_grid_size, &block_size, parallel_for<decltype(dummy)>, 0, 0);
+  
+  // Calculate theoretical occupancy.
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_active_blocks, parallel_for<decltype(dummy)>, block_size, 0);
+
+  int curr_device;
+  cudaDeviceProp props;
+  cudaGetDevice(&curr_device);
+  cudaGetDeviceProperties(&props, curr_device);
+
+  float occupancy = (max_active_blocks * block_size / props.warpSize) / 
+                    (float)(props.maxThreadsPerMultiProcessor / 
+                            props.warpSize);
+
+  std::cout << "Block Size: " << block_size << std::endl;
+  std::cout << "Minimum Grid Size: " << minimum_grid_size << std::endl;
+  std::cout << "Maximum Active Blocks per SM: " << max_active_blocks << std::endl;
+  std::cout << "Theoretical Occupancy: " << occupancy << std::endl;
 }
 
 void read_binary(std::string filename, graph_t* g) {
@@ -129,7 +178,7 @@ void do_test(graph_t* g) {
   
   int num_gpus = get_num_gpus();
   int n_rows = g->n_rows;
-  // int n_nnz = g->n_nnz;
+  int n_nnz = g->n_nnz;
   // int n_cols = g->n_cols;
 
   // --
@@ -169,16 +218,22 @@ void do_test(graph_t* g) {
   for(int i = 0; i < n_rows; i++) h_randoms[i] = rand() % n_rows;
   
   int* randoms;
-  physical_memory<int> pm_randoms(n_rows * sizeof(int) , devices);
+  physical_memory<int> pm_randoms(n_rows * num_gpus * sizeof(int), devices);
+  // physical_memory<int> pm_randoms(n_rows * sizeof(int), devices);
   virtual_memory<int> vm_randoms(pm_randoms.padded_size);
   memory_mapper<int> map_randoms(vm_randoms, pm_randoms, devices);
   randoms = map_randoms.data();
-  cudaMemcpy(randoms, h_randoms, n_rows * sizeof(int), cudaMemcpyHostToDevice);
+
+  for(int i = 0; i < num_gpus; i++)
+    cudaMemcpy(randoms + (n_rows * i), h_randoms, n_rows * sizeof(int), cudaMemcpyHostToDevice);
+
+  // NO DUPLICATION::
+  // cudaMemcpy(randoms, h_randoms, n_rows * sizeof(int), cudaMemcpyHostToDevice);
 
   // --
   // Run
-  for(int i = 0; i < num_gpus; i++) {
-    cudaSetDevice(i);  
+  for(int dev = 0; dev < num_gpus; dev++) {
+    cudaSetDevice(dev);  
     cudaDeviceSynchronize();
   }
 
@@ -186,84 +241,89 @@ void do_test(graph_t* g) {
 
   my_timer_t t;
   std::vector<float> per_iteration_times;
-  
-  nvtxRangePushA("thrust_work");
 
   int* indptr = g->indptr;
   int* indices = g->indices;
   float* data = g->data;
-  
   int iteration = 0;
+  
+  nvtxRangePushA("color:: while(iteration)");
+  
+  
   while(iteration < 29) {
-    t.begin();
-
-    auto fn = [indptr, indices, data, colors, randoms, iteration] __device__(int const& vertex) {
-      if(vertex == -1) return -1;
-      
-      int start  = indptr[vertex];
-      int end    = indptr[vertex + 1];
-      int degree = end - start;
-
-      bool colormax = true;
-      bool colormin = true;
-      int color     = iteration * 2;
-
-      for (int i = 0; i < degree; i++) {
-        int u = indices[start + i];
-
-        if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
-          continue;
-        if (randoms[vertex] <= randoms[u])
-          colormax = false;
-        if (randoms[vertex] >= randoms[u])
-          colormin = false;
-      }
-
-      if (colormax) {
-        colors[vertex] = color + 1;
-        return -1;
-      } else if (colormin) {
-        colors[vertex] = color + 2;
-        return -1;
-      } else {
-        return vertex;
-      }
-    };
-
     int chunk_size  = (n_rows + num_gpus - 1) / num_gpus;
+    t.begin();
     
     #pragma omp parallel for num_threads(num_gpus)
-    for(int i = 0 ; i < num_gpus ; i++) {
-      
-      cudaSetDevice(i);
-      
-      // auto input_begin  = input + chunk_size * i;
-      // auto input_end    = input + chunk_size * (i + 1);
-      // if(i == num_gpus - 1) input_end = input + n_rows;
+    for(int dev = 0 ; dev < num_gpus ; dev++) {
 
-      auto offset = chunk_size * i;
+        auto fn = [indptr, indices, data, colors, randoms, iteration, dev, n_rows, n_nnz] __device__(int& vertex) {
+        if(vertex == -1) return;
+        
+        // weird device-aware access.
+        // can be hidden behind graph API.
+        int start  = indptr[vertex + ((n_rows + 1) * dev)];
+        int end    = indptr[vertex + 1 + ((n_rows + 1) * dev)];
+        int degree = end - start;
+
+        bool colormax = true;
+        bool colormin = true;
+        int color     = iteration * 2;
+
+        for (int i = 0; i < degree; i++) {
+          // weird device-aware access.
+          // can be hidden behind graph API.
+          int u = indices[start + i + (n_nnz * dev)];
+
+          if (colors[u] != -1 && (colors[u] != color + 1) && (colors[u] != color + 2) || (vertex == u))
+            continue;
+          if (randoms[vertex + (n_rows * dev)] <= randoms[u + (n_rows * dev)])  // weird device-aware access.
+            colormax = false;
+          if (randoms[vertex + (n_rows * dev)] >= randoms[u + (n_rows * dev)]) // weird device-aware access.
+            colormin = false;
+          
+          if(!colormax && !colormin) return; // optimization
+        }
+
+        if (colormax) {
+          colors[vertex] = color + 1;
+          vertex = -1;
+        } else if (colormin) {
+          colors[vertex] = color + 2;
+          vertex = -1;
+        }
+      };
+      
+      cudaSetDevice(dev);
+
+      auto offset = chunk_size * dev;
       auto length = chunk_size;
-      if(i == num_gpus - 1) length = n_rows - (chunk_size * (num_gpus - 1)) ;
+      if(dev == num_gpus - 1) 
+        length = n_rows - (chunk_size * (num_gpus - 1)) ;
 
-      parallel_for<<<FORALL_GRIDSIZE, 
-                     FORALL_BLOCKSIZE, 
-                     0, infos[i].stream>>>(
+      parallel_for<<<minimum_grid_size, 
+                     block_size, 
+                     0, infos[dev].stream>>>(
                        input, fn, length, offset);
 
-      cudaEventRecord(infos[i].event, infos[i].stream);
+      cudaEventRecord(infos[dev].event, infos[dev].stream);
     }
     
-    for(int i = 0; i < num_gpus; i++)
-      cudaStreamWaitEvent(master_stream, infos[i].event, 0);
+    for(int dev = 0; dev < num_gpus; dev++)
+      cudaStreamWaitEvent(master_stream, infos[dev].event, 0);
 
     cudaStreamSynchronize(master_stream);
-      
-    iteration++;
     t.end();
+
+    iteration++;
+    
     per_iteration_times.push_back(t.milliseconds());
     std::cout << t.milliseconds() << std::endl;
   }
+
+  // Pop -> color:: while(iteration)
   nvtxRangePop();
+
   
   // Log
   thrust::host_vector<int> out(n_rows);
@@ -285,23 +345,33 @@ int main(int argc, char** argv) {
   std::string inpath = argv[1];
   graph_t h_graph;
 
+  // enable_peer_access();  // we don't need this.
   create_contexts();
+  occupancy();
   read_binary(inpath, &h_graph);
 
   graph_t d_graph;
+  int num_gpus = get_num_gpus();
+
+  // IMPORTANT TODO!!!! We can do slightly better by 
+  // declaring read only accesses for some stuff.
+  // Like graphs, and randoms array.
 
   // Memory mapping for row pointers.
-  physical_memory<int> pm_indptr((h_graph.n_rows + 1) * sizeof(int) , devices);
+  physical_memory<int> pm_indptr((h_graph.n_rows + 1) * num_gpus * sizeof(int) , devices);
+  // physical_memory<int> pm_indptr((h_graph.n_rows + 1) * sizeof(int) , devices);
   virtual_memory<int> vm_indptr(pm_indptr.padded_size);
   memory_mapper<int> map_indptr(vm_indptr, pm_indptr, devices);
 
   // Memory mapping for indices.
-  physical_memory<int> pm_indices(h_graph.n_nnz * sizeof(int) , devices);
+  physical_memory<int> pm_indices(h_graph.n_nnz * sizeof(int) * num_gpus , devices);  
+  // physical_memory<int> pm_indices(h_graph.n_nnz * sizeof(int), devices);
   virtual_memory<int> vm_indices(pm_indices.padded_size);
   memory_mapper<int> map_indices(vm_indices, pm_indices, devices);
 
   // Memory mapping for data.
-  physical_memory<float> pm_data(h_graph.n_nnz * sizeof(float) , devices);
+  physical_memory<float> pm_data(h_graph.n_nnz * sizeof(float) * num_gpus , devices);
+  // physical_memory<float> pm_data(h_graph.n_nnz * sizeof(float), devices);
   virtual_memory<float> vm_data(pm_data.padded_size);
   memory_mapper<float> map_data(vm_data, pm_data, devices);
 
@@ -312,18 +382,26 @@ int main(int argc, char** argv) {
   d_graph.indices = map_indices.data();
   d_graph.data = map_data.data();
 
-  cuMemcpyHtoD((CUdeviceptr)d_graph.indptr, (void*)h_graph.indptr, (h_graph.n_rows + 1) * sizeof(int));
-  cuMemcpyHtoD((CUdeviceptr)d_graph.indices, (void*)h_graph.indices, h_graph.n_nnz * sizeof(int));
-  cuMemcpyHtoD((CUdeviceptr)d_graph.data, (void*)h_graph.data, h_graph.n_nnz * sizeof(float));
+  // Instead of one-copy of graph for the entire system, we create
+  // graph that is num_gpus times bigger, and copy it to each device.
+  for(int i = 0; i < num_gpus; i++) {
+    cudaMemcpy(d_graph.indptr + ((d_graph.n_rows + 1) * i), h_graph.indptr, (h_graph.n_rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_graph.indices + (d_graph.n_nnz * i), h_graph.indices, h_graph.n_nnz * sizeof(int), cudaMemcpyHostToDevice );
+    cudaMemcpy(d_graph.data + (d_graph.n_nnz * i), h_graph.data, h_graph.n_nnz * sizeof(float), cudaMemcpyHostToDevice);
+  }
+
+  // NO DUPLICATION::
+  // cudaMemcpy(d_graph.indptr, h_graph.indptr, (h_graph.n_rows + 1) * sizeof(int), cudaMemcpyHostToDevice);
+  // cudaMemcpy(d_graph.indices, h_graph.indices, h_graph.n_nnz * sizeof(int), cudaMemcpyHostToDevice );
+  // cudaMemcpy(d_graph.data, h_graph.data, h_graph.n_nnz * sizeof(float), cudaMemcpyHostToDevice);
 
   free(h_graph.indptr);
   free(h_graph.indices);
   free(h_graph.data);
   
-  int num_gpus = get_num_gpus();
   std::cout << "color | num_gpus: " << num_gpus << " vertices: " << d_graph.n_rows << std::endl;
 
-  int num_iters = 1;
+  int num_iters = 4;
   for(int i = 0; i < num_iters; i++)
     do_test(&d_graph);
 

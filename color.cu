@@ -275,6 +275,8 @@ void do_test() {
           colormax = false;
         if (randoms[vertex] >= randoms[u])
           colormin = false;
+
+        if(!colormax && !colormin) return vertex; // optimization
       }
 
       if (colormax) {
